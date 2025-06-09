@@ -71,9 +71,6 @@ from executorch.exir.tests.models import MLP, Mul
 from functorch.experimental import control_flow
 
 from torch import nn
-
-from torch.ao.quantization.quantize_pt2e import convert_pt2e, prepare_pt2e
-from torch.ao.quantization.quantizer import QuantizationSpec
 from torch.export import export
 from torch.export.graph_signature import InputKind, InputSpec, TensorArgument
 from torch.fx import GraphModule, subgraph_rewriter
@@ -81,6 +78,9 @@ from torch.fx.experimental.proxy_tensor import make_fx
 from torch.library import impl, Library
 from torch.testing import FileCheck
 from torch.utils import _pytree as pytree
+
+from torchao.quantization.pt2e.quantize_pt2e import convert_pt2e, prepare_pt2e
+from torchao.quantization.pt2e.quantizer import QuantizationSpec
 
 
 # pyre-ignore
@@ -682,7 +682,6 @@ class TestPasses(unittest.TestCase):
         inputs = eager_model.get_random_inputs()
         gm = export(eager_model, inputs, strict=True).graph_module
 
-        self.assertTrue(torch.ops.aten.sub.Tensor in collect_ops(gm))
         dead_code_elimination_pass(gm)
         gm.print_readable()
         self.assertFalse(torch.ops.aten.sub.Tensor in collect_ops(gm))
@@ -1027,6 +1026,34 @@ class TestPasses(unittest.TestCase):
             "executorch_exir_dialects_edge__ops_aten_slice_copy_Tensor"
         ).run(gm.code)
 
+    def test_constant_prop_for_output(self) -> None:
+        class Add(torch.nn.Module):
+            def forward(self) -> torch.Tensor:
+                return torch.add(torch.tensor(3), torch.tensor(5))
+
+        add = Add()
+
+        edge = to_edge(
+            export(add, (), strict=True),
+            compile_config=EdgeCompileConfig(_skip_dim_order=False),
+        )
+        # Check there is a lifted tensor followed by a to_copy node
+        FileCheck().check("c_lifted_tensor_0").check("c_lifted_tensor_1").run(
+            edge.exported_program().graph_module.code
+        )
+
+        edge._edge_programs["forward"] = constant_prop_pass(
+            edge.exported_program("forward")
+        )
+
+        # Check (c_lifted_tensor_*) nodes are all replaced by _prop_tensor_constant.
+        FileCheck().check_not("c_lifted_tensor_").check("_prop_tensor_constant").run(
+            edge.exported_program().graph_module.code
+        )
+        # Validate that the program successfully passes validation to executorch:
+        edge.exported_program()._validate()
+        edge.to_executorch()
+
     def test_constant_prop_pass_for_add(self) -> None:
         class Add(torch.nn.Module):
             def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -1169,10 +1196,7 @@ class TestPasses(unittest.TestCase):
         ).module()
 
         # 8w16a quantization
-        from torch.ao.quantization.observer import (
-            MinMaxObserver,
-            PerChannelMinMaxObserver,
-        )
+        from torchao.quantization.pt2e import MinMaxObserver, PerChannelMinMaxObserver
 
         activation_qspec = QuantizationSpec(
             dtype=torch.int16,
@@ -1824,3 +1848,34 @@ class TestPasses(unittest.TestCase):
         self.assertTrue(
             torch.allclose(output_no_dim_order[0], output_no_dim_order_revert[0])
         )
+
+    def test_constant_prop_pass_none(self) -> None:
+        """
+        This checks that None arguments are treated as constants in constant_prop_pass.
+        """
+
+        class M(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.cst = torch.ones(3, 3, 3, dtype=torch.int8)
+                self.w = torch.ones(3, 3, 3, dtype=torch.int8)
+
+            def forward(self, x):
+                # Note: using e.g aten.linear would not work as None is not in the graph
+                a = torch.ops.aten.convolution.default(
+                    self.cst, self.w, None, [1], [0], [1], False, [0], 1
+                )
+                return a + x
+
+        mod = M()
+        x = torch.randn([3, 3, 3])
+        mod(x)
+        edge = to_edge(
+            export(mod, (x,), strict=True),
+            compile_config=exir.EdgeCompileConfig(_check_ir_validity=False),
+        )
+        # 2 constants: self.w and self.cst
+        self.assertEqual(2, len(edge.exported_program().constants))
+        pass_result = constant_prop_pass(edge.exported_program())
+        # 1 constant: a (= self.w @ self.cst)
+        self.assertEqual(1, len(pass_result.constants))

@@ -35,11 +35,10 @@ from executorch.extension.export_util.utils import export_to_edge, save_pte_prog
 
 from executorch.extension.llm.export.export_passes import RemoveRedundantTransposes
 from pytorch_tokenizers import get_tokenizer
-from torch.ao.quantization.quantize_pt2e import convert_pt2e, prepare_pt2e
-from torch.ao.quantization.quantizer import Quantizer
-from torch.ao.quantization.quantizer.composable_quantizer import ComposableQuantizer
 from torch.export import export_for_training, ExportedProgram
 from torch.nn.attention import SDPBackend
+from torchao.quantization.pt2e.quantize_pt2e import convert_pt2e, prepare_pt2e
+from torchao.quantization.pt2e.quantizer import ComposableQuantizer, Quantizer
 from torchao.utils import unwrap_tensor_subclass
 
 FORMAT = "[%(levelname)s %(asctime)s %(filename)s:%(lineno)s] %(message)s"
@@ -367,7 +366,9 @@ class LLMEdgeManager:
             with torch.nn.attention.sdpa_kernel([SDPBackend.MATH]), torch.no_grad():
                 if self.verbose:
                     logging.info(f"Applied quantizers: {quantizers}")
+
                 composed_quantizer = ComposableQuantizer(quantizers)
+
                 assert (
                     self.pre_autograd_graph_module is not None
                 ), "Please run export() first"

@@ -19,6 +19,7 @@ from typing import Callable, List, Optional, Tuple
 import numpy as np
 
 import torch
+import torchao
 from executorch.backends.qualcomm.quantizer.quantizer import (
     ModuleQConfig,
     QnnQuantizer,
@@ -33,8 +34,8 @@ from executorch.backends.qualcomm.utils.utils import (
 )
 from executorch.exir.capture._config import ExecutorchBackendConfig
 from executorch.exir.passes.memory_planning_pass import MemoryPlanningPass
-from torch.ao.quantization.observer import MovingAverageMinMaxObserver
-from torch.ao.quantization.quantize_pt2e import (
+from torchao.quantization.pt2e import MovingAverageMinMaxObserver
+from torchao.quantization.pt2e.quantize_pt2e import (
     convert_pt2e,
     prepare_pt2e,
     prepare_qat_pt2e,
@@ -58,8 +59,6 @@ class SimpleADB:
         runner (str): Runtime executor binary
         expected_input_shape (Tuple[torch.Size]): input shape of dynamic graph
         expected_output_shape (Tuple[torch.Size]): output shape of dynamic graph
-        expected_input_dtype (Tuple[torch.dtype]): input dtype
-        expected_output_sdtype (Tuple[torch.dtype]): output dtype
     """
 
     def __init__(
@@ -231,7 +230,7 @@ def ptq_calibrate(captured_model, quantizer, dataset):
 
 def qat_train(ori_model, captured_model, quantizer, dataset):
     data, targets = dataset
-    annotated_model = torch.ao.quantization.move_exported_model_to_train(
+    annotated_model = torchao.quantization.pt2e.move_exported_model_to_train(
         prepare_qat_pt2e(captured_model, quantizer)
     )
     optimizer = torch.optim.SGD(annotated_model.parameters(), lr=0.00001)
@@ -240,7 +239,9 @@ def qat_train(ori_model, captured_model, quantizer, dataset):
         print(f"Epoch {i}")
         if i > 3:
             # Freeze quantizer parameters
-            annotated_model.apply(torch.ao.quantization.disable_observer)
+            annotated_model.apply(
+                torchao.quantization.pt2e.fake_quantize.disable_observer
+            )
         if i > 2:
             # Freeze batch norm mean and variance estimates
             annotated_model.apply(torch.nn.intrinsic.qat.freeze_bn_stats)
@@ -251,8 +252,8 @@ def qat_train(ori_model, captured_model, quantizer, dataset):
         loss.backward()
         optimizer.step()
 
-    return torch.ao.quantization.quantize_pt2e.convert_pt2e(
-        torch.ao.quantization.move_exported_model_to_eval(annotated_model)
+    return convert_pt2e(
+        torchao.quantization.pt2e.move_exported_model_to_eval(annotated_model),
     )
 
 
@@ -296,6 +297,7 @@ def build_executorch_binary(
     passes_job=None,
     qat_training_data=None,
     online_prepare=False,
+    optrace=False,
 ):
     """
     A function to generate an ExecuTorch binary for Qualcomm platforms.
@@ -316,6 +318,7 @@ def build_executorch_binary(
         passes_job (OrderedDict, optional): Custom passes job in capture_program, users can enable/disable specific passes or modify their attributes.
         qat_training_data (List[torch.Tensor], optional): A dataset for quantization aware training(QAT). Typically is a pair of tensors, such as [features, ground truth].
         online_prepare (bool, optional): Compose QNN graph on device if set to True.
+        optrace (bool, optional): Enable optrace mode for performance analysis if set to True.
 
     Returns:
         None: The function writes the output to a specified .pte file.
@@ -327,6 +330,7 @@ def build_executorch_binary(
         soc_model=getattr(QcomChipset, soc_model),
         backend_options=backend_options,
         online_prepare=online_prepare,
+        optrace=optrace,
         shared_buffer=shared_buffer,
         dump_intermediate_outputs=dump_intermediate_outputs,
     )
@@ -583,6 +587,13 @@ def setup_common_args_and_variables():
         "--enable_x86_64",
         help="Enable unittest to be executed on x86_64 platform",
         action="store_true",
+    )
+
+    parser.add_argument(
+        "--ci",
+        help="This flag is for Continuous Integration(CI) purpose and is NOT recommended to turn on for typical use cases. It will use random inputs instead of real inputs.",
+        action="store_true",
+        default=False,
     )
 
     # QNN_SDK_ROOT might also be an argument, but it is used in various places.

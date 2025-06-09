@@ -17,7 +17,10 @@ from executorch.backends.arm.operators.node_visitor import (
     NodeVisitor,
     register_node_visitor,
 )
-
+from executorch.backends.arm.operators.operator_validation_utils import (
+    validate_num_inputs,
+    validate_same_dtype,
+)
 from executorch.backends.arm.tosa_mapping import TosaArg
 from executorch.backends.arm.tosa_specification import TosaSpecification
 from executorch.backends.arm.tosa_utils import tosa_shape
@@ -46,12 +49,8 @@ class MaxVisitor_0_80(NodeVisitor):
 
         import tosa_tools.v0_80.serializer.tosa_serializer as ts  # type: ignore
 
-        if inputs[0].dtype != inputs[1].dtype and inputs[0].dtype != output.dtype:
-            raise TypeError(
-                f"Data type of inputs and output must be the same. Got input 0 dtype: "
-                f"{inputs[0].dtype}, input 1 dtype: {inputs[1].dtype} and output "
-                f"dtype: {output.dtype}"
-            )
+        validate_num_inputs(self.target, inputs, 2)
+        validate_same_dtype(self.target, [*inputs, output], ts)
 
         scale_back = 1.0
         max_output = output
@@ -113,12 +112,8 @@ class MaxVisitor(NodeVisitor):
         import serializer.tosa_serializer as ts  # type: ignore
         from tosa.NanPropagationMode import NanPropagationMode  # type: ignore
 
-        if inputs[0].dtype != inputs[1].dtype and inputs[0].dtype != output.dtype:
-            raise TypeError(
-                f"Data type of inputs and output must be the same. Got input 0 dtype: "
-                f"{inputs[0].dtype}, input 1 dtype: {inputs[1].dtype} and output "
-                f"dtype: {output.dtype}"
-            )
+        validate_num_inputs(self.target, inputs, 2)
+        validate_same_dtype(self.target, [*inputs, output], ts)
 
         scale_back = 1.0
         max_output = output
@@ -134,7 +129,7 @@ class MaxVisitor(NodeVisitor):
                 )
 
             operand_inputs, scale_back = tqutils.insert_rescale_ops_to_int32(
-                tosa_graph, inputs, node, self.tosa_specs
+                tosa_graph, inputs, node, self.tosa_spec
             )
 
             output.shape = tosa_shape(output.shape, output.dim_order)
@@ -160,5 +155,5 @@ class MaxVisitor(NodeVisitor):
         if output.dtype == ts.DType.INT8:
             # insert RESCALE from int32 back to int8
             tqutils.insert_rescale_op_to_int8(
-                tosa_graph, max_output, scale_back, node, self.tosa_specs
+                tosa_graph, max_output, scale_back, node, self.tosa_spec
             )

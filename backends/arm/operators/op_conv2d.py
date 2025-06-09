@@ -6,7 +6,6 @@
 # pyre-unsafe
 from typing import Any, List
 
-import numpy as np
 import torch
 
 from executorch.backends.arm._passes.fold_qdq_with_annotated_qparams_pass import (
@@ -16,6 +15,9 @@ from executorch.backends.arm._passes.fold_qdq_with_annotated_qparams_pass import
 from executorch.backends.arm.operators.node_visitor import (
     NodeVisitor,
     register_node_visitor,
+)
+from executorch.backends.arm.operators.operator_validation_utils import (
+    validate_num_inputs,
 )
 from executorch.backends.arm.tosa_mapping import TosaArg
 from executorch.backends.arm.tosa_quant_utils import build_rescale, build_rescale_v0_80
@@ -67,6 +69,7 @@ class Conv2dVisitor_0_80(NodeVisitor):
         import tosa_tools.v0_80.serializer.tosa_serializer as ts  # type: ignore
 
         input, weight, bias, stride, pad, dilation, _, _, group = inputs
+        validate_num_inputs(self.target, inputs, 9)
 
         # Get the attributes of convolution.
         attr = ts.TosaSerializerAttribute()
@@ -242,6 +245,7 @@ class Conv2dVisitor(NodeVisitor):
         from tosa.RoundingMode import RoundingMode  # type: ignore
 
         input, weight, bias, stride, pad, dilation, _, _, group = inputs
+        validate_num_inputs(self.target, inputs, 9)
 
         # Get the attributes of convolution.
         attr = ts.TosaSerializerAttribute()
@@ -272,17 +276,29 @@ class Conv2dVisitor(NodeVisitor):
             input_qparams = get_input_qparams(node)
             input_zp = input_qparams[0].zp
 
-        tosa_graph.addConst([1], output.dtype, [input_zp], name=f"{node.name}_input_zp")
-        tosa_graph.addConst([1], output.dtype, [0], name=f"{node.name}_weight_zp")
+        # The output type is int32 when input type is int8.
+        conv2d_output_name = output.name
+        if output.dtype == ts.DType.INT8:
+            conv2d_res = tosa_graph.addIntermediate(
+                tosa_shape(output.shape, output.dim_order), ts.DType.INT32
+            )
+            conv2d_output_name = conv2d_res.name
         acc_type = (
             inputs[0].dtype if inputs[0].dtype == ts.DType.FP32 else ts.DType.INT32
+        )
+
+        tosa_graph.addConst(
+            [1], output.dtype, [input_zp], name=f"{conv2d_output_name}_input_zp"
+        )
+        tosa_graph.addConst(
+            [1], output.dtype, [0], name=f"{conv2d_output_name}_weight_zp"
         )
 
         # Non-bias case.
         if len(node.all_input_nodes) == 2:
             # Create a zero bias tensor if not presented
             out_channels = weight.shape[0]
-            bias_name = "bias" + node.name.split("default", 1)[1]
+            bias_name = f"{conv2d_output_name}_bias"
             bias_type = output.dtype
             if output.dtype == ts.DType.INT8:
                 # Conv is quantized to int8, but the TOSA operator has
@@ -295,14 +311,6 @@ class Conv2dVisitor(NodeVisitor):
                 [0] * out_channels,
                 name=bias_name,
             )
-
-        # The output type is int32 when input type is int8.
-        conv2d_output_name = output.name
-        if output.dtype == ts.DType.INT8:
-            conv2d_res = tosa_graph.addIntermediate(
-                tosa_shape(output.shape, output.dim_order), ts.DType.INT32
-            )
-            conv2d_output_name = conv2d_res.name
 
         # Given input.shape is (N, Ci, H, W), and weight.shape is (Co, Ci/G, H, W)
         in_channels = input.shape[1]
@@ -324,21 +332,22 @@ class Conv2dVisitor(NodeVisitor):
                 weight.dtype,
             )
             shape = tosa_graph.addConst(
-                np.array(weight_post_shape).shape,
+                [len(weight_post_shape)],
                 ts.DType.SHAPE,
-                np.array(weight_post_shape),
+                weight_post_shape,
                 name=weight_reshaped.name + "_shape",
             )
 
-            attr = ts.TosaSerializerAttribute()
-            attr.ReshapeAttribute()
+            reshape_attr = ts.TosaSerializerAttribute()
+            reshape_attr.ReshapeAttribute()
             tosa_graph.addOperator(
                 ts.TosaOp.Op().RESHAPE,
                 [weight.name, shape.name],
                 [weight_reshaped.name],
-                attr,
+                reshape_attr,
             )
 
+            attr = ts.TosaSerializerAttribute()
             tosa_op = ts.TosaOp.Op().DEPTHWISE_CONV2D
             weight_name = weight_reshaped.name
 
@@ -368,8 +377,8 @@ class Conv2dVisitor(NodeVisitor):
                 input.name,
                 weight_name,
                 bias.name,
-                f"{node.name}_input_zp",
-                f"{node.name}_weight_zp",
+                f"{conv2d_output_name}_input_zp",
+                f"{conv2d_output_name}_weight_zp",
             ],
             [conv2d_output_name],
             attr,
