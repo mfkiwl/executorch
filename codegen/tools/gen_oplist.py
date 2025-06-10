@@ -15,20 +15,27 @@ import yaml
 
 try:
     from executorch.codegen.parse import strip_et_fields
+    from executorch.exir._serialize import _deserialize_pte_binary
+    from executorch.exir.schema import (
+        EValue,
+        KernelCall,
+        OptionalTensorList,
+        Tensor,
+        TensorList
+    )
 except ImportError:
     # If we build from source, executorch.codegen is not available.
     # We can use relative import instead.
     from ..parse import strip_et_fields
+    from ..exir._serialize import _deserialize_pte_binary
+    from ..exir.schema import (
+        EValue,
+        KernelCall,
+        OptionalTensorList,
+        Tensor,
+        TensorList
+    )
 
-
-from executorch.exir._serialize import _deserialize_pte_binary
-from executorch.exir.schema import (
-    EValue,
-    KernelCall,
-    OptionalTensorList,
-    Tensor,
-    TensorList,
-)
 from torchgen.gen import LineLoader, parse_native_yaml_struct
 from torchgen.selective_build.operator import SelectiveBuildOperator
 from torchgen.selective_build.selector import merge_et_kernel_metadata
